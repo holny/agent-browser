@@ -672,6 +672,7 @@ pub fn run_mcp(args: &[String]) -> Result<(), String> {
             let stdout = Arc::clone(&stdout);
             let in_flight = Arc::clone(&in_flight);
             let stop = Arc::clone(&stop);
+            reap_finished_workers(&mut workers);
             workers.push(thread::spawn(move || {
                 let _guard = ActiveCancelGuard::install(Arc::clone(&cancel));
                 let mut exit_after_response = false;
@@ -720,6 +721,13 @@ pub fn run_mcp(args: &[String]) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Drop handles for tool-call threads that already exited. Their responses
+/// were written before the thread returned, so a long-lived session no longer
+/// accumulates one `JoinHandle` per `tools/call`.
+fn reap_finished_workers(workers: &mut Vec<thread::JoinHandle<()>>) {
+    workers.retain(|worker| !worker.is_finished());
 }
 
 fn write_shared(stdout: &Mutex<io::Stdout>, response: &Value) -> bool {
@@ -4256,6 +4264,22 @@ fn write_json_line(stdout: &mut io::Stdout, value: &Value) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reap_finished_workers_drops_exited_threads() {
+        let quick: Vec<thread::JoinHandle<()>> = (0..3).map(|_| thread::spawn(|| {})).collect();
+        for worker in &quick {
+            while !worker.is_finished() {
+                thread::yield_now();
+            }
+        }
+
+        let mut workers = quick;
+        workers.push(thread::spawn(|| thread::sleep(Duration::from_millis(200))));
+        reap_finished_workers(&mut workers);
+
+        assert_eq!(workers.len(), 1);
+    }
 
     #[test]
     fn tools_list_contains_typed_tools() {
