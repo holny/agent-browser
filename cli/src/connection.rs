@@ -1397,6 +1397,61 @@ mod tests {
     }
 
     #[test]
+    fn test_env_derived_default_timeout_omission_does_not_restart() {
+        // Issue #1939: the CLI stamps opts.default_timeout from
+        // AGENT_BROWSER_DEFAULT_TIMEOUT. A follow-up command without the env
+        // var parses to None, which used to change the fingerprint and
+        // restart the daemon (dropping the browser mid-session). With the
+        // JSON config, an omitted optional field defers to the daemon.
+        let domains: Vec<String> = Vec::new();
+        let mk = |default_timeout: Option<u64>| DaemonOptions {
+            headed: false,
+            debug: false,
+            executable_path: None,
+            extensions: &[],
+            init_scripts: &[],
+            enable: &[],
+            args: None,
+            user_agent: None,
+            proxy: None,
+            proxy_bypass: None,
+            proxy_username: None,
+            proxy_password: None,
+            ignore_https_errors: false,
+            allow_file_access: false,
+            hide_scrollbars: true,
+            webgpu: false,
+            profile: None,
+            state: None,
+            provider: None,
+            device: None,
+            session_name: None,
+            restore_save: None,
+            restore_check_url: None,
+            restore_check_text: None,
+            restore_check_fn: None,
+            download_path: None,
+            allowed_domains: Some(&domains),
+            action_policy: None,
+            confirm_actions: None,
+            engine: None,
+            auto_connect: false,
+            pin_tab: false,
+            idle_timeout: None,
+            default_timeout,
+            cdp: None,
+            no_auto_dialog: false,
+            plugins: None,
+        };
+        let stored = daemon_config_json(&mk(Some(90_000)));
+
+        assert!(daemon_config_compatible(&stored, &mk(None)));
+
+        let changed_env = mk(Some(60_000));
+        assert!(!daemon_config_compatible(&stored, &changed_env));
+    }
+
+    #[test]
     fn test_spawn_race_loser_does_not_overwrite_winner_config() {
         let guard = EnvGuard::new(&["AGENT_BROWSER_SOCKET_DIR", "AGENT_BROWSER_NAMESPACE"]);
         let dir = tempfile::tempdir().unwrap();
