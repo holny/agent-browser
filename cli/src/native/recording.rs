@@ -51,9 +51,10 @@ const HIGH_FPS_ENCODER_THREADS: &str = "4";
 /// VP8 budget chosen for readable UI text and thin drawing strokes.
 const WEBM_BITRATE_KBPS: u32 = 8000;
 
-/// Captured frames may wait briefly for compositing, but overload must fail
-/// the recording instead of silently degrading it into held frames.
-const ENCODER_FRAME_BUFFER: usize = 16;
+const ENCODER_FRAME_BUFFER: usize = 32;
+
+/// When the encoder falls behind, the producer blocks via `send()` rather than
+/// aborting.  Chrome's screencast naturally slows to the encoder's throughput.
 const MAX_ENCODER_LAG: Duration = Duration::from_millis(500);
 const ENCODER_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
@@ -1674,12 +1675,8 @@ async fn collect_frames(
                         };
                         sequence += 1;
                         shared_captured.fetch_add(1, Ordering::Relaxed);
-                        frame_tx.try_send(frame.clone()).map_err(|error| match error {
-                            mpsc::error::TrySendError::Full(_) => format!(
-                                "Recording encoder fell behind by more than {} buffered frames",
-                                ENCODER_FRAME_BUFFER
-                            ),
-                            mpsc::error::TrySendError::Closed(_) => {
+                        frame_tx.send(frame.clone()).await.map_err(|error| match error {
+                            mpsc::error::SendError(_) => {
                                 "Recording encoder stopped unexpectedly".to_string()
                             }
                         })?;
