@@ -55,7 +55,10 @@ const ENCODER_FRAME_BUFFER: usize = 32;
 
 /// When the encoder falls behind, the producer blocks via `send()` rather than
 /// aborting.  Chrome's screencast naturally slows to the encoder's throughput.
-const MAX_ENCODER_LAG: Duration = Duration::from_millis(500);
+/// At high resolution (e.g. 1920x1080) the encoder may temporarily lag by
+/// more than 500 ms; allow 2 s so back-pressure can take effect before abort.
+const MAX_ENCODER_LAG_MS: u64 = 2000;
+const MAX_ENCODER_LAG: Duration = Duration::from_millis(MAX_ENCODER_LAG_MS);
 const ENCODER_WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Upper bound on waiting for Chrome to acknowledge screencast teardown.
@@ -1828,7 +1831,7 @@ async fn encode_stream(
             frame = frames.recv() => {
                 let Some(frame) = frame else { break };
                 if frame.captured_at.elapsed() > MAX_ENCODER_LAG {
-                    return Err("Recording encoder fell more than 500 ms behind capture".to_string());
+                    return Err(format!("Recording encoder fell more than {} ms behind capture", MAX_ENCODER_LAG_MS));
                 }
                 if latest.is_none() {
                     interval.reset_at(frame.captured_at);
@@ -1837,7 +1840,7 @@ async fn encode_stream(
             }
             tick = interval.tick() => {
                 if tick.elapsed() > MAX_ENCODER_LAG && latest.is_some() {
-                    return Err("Recording encoder fell more than 500 ms behind capture".to_string());
+                    return Err(format!("Recording encoder fell more than {} ms behind capture", MAX_ENCODER_LAG_MS));
                 }
                 let Some(frame) = latest.as_ref() else { continue };
                 let output_timestamp = cursor_timestamp();
