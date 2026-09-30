@@ -109,6 +109,69 @@ fn format_storage_value(value: &serde_json::Value) -> String {
         .unwrap_or_else(|| serde_json::to_string(value).unwrap_or_default())
 }
 
+fn format_request_detail_text(data: &serde_json::Value) -> Option<String> {
+    let url = data.get("url")?.as_str()?;
+    let method = data.get("method").and_then(|v| v.as_str()).unwrap_or("?");
+    let resource_type = data
+        .get("resourceType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("?");
+    let status = data.get("status").and_then(|v| v.as_i64());
+    let request_id = data.get("requestId").and_then(|v| v.as_str()).unwrap_or("?");
+    let mime_type = data.get("mimeType").and_then(|v| v.as_str());
+    let response_body = data.get("responseBody").and_then(|v| v.as_str());
+    let post_data = data.get("postData").and_then(|v| v.as_str());
+    let headers = data.get("headers");
+    let response_headers = data.get("responseHeaders");
+
+    let timestamp = data.get("timestamp").and_then(|v| v.as_u64());
+
+    let mut lines = Vec::new();
+    lines.push(format!("{} {}", method, url));
+    lines.push(format!("  Request ID: {}", request_id));
+    if let Some(ts) = timestamp {
+        lines.push(format!("  Timestamp: {}", ts));
+    }
+    lines.push(format!("  Type: {}", resource_type));
+    if let Some(s) = status {
+        lines.push(format!("  Status: {}", s));
+    }
+    if let Some(m) = mime_type {
+        lines.push(format!("  MIME type: {}", m));
+    }
+
+    if let Some(h) = headers {
+        let obj = h.as_object()?;
+        if !obj.is_empty() {
+            lines.push("  Request headers:".to_string());
+            for (k, v) in obj {
+                lines.push(format!("    {}: {}", k, v));
+            }
+        }
+    }
+
+    if let Some(rh) = response_headers {
+        if let Some(obj) = rh.as_object() {
+            if !obj.is_empty() {
+                lines.push("  Response headers:".to_string());
+                for (k, v) in obj {
+                    lines.push(format!("    {}: {}", k, v));
+                }
+            }
+        }
+    }
+
+    if let Some(pd) = post_data {
+        lines.push(format!("  POST data: {}", pd));
+    }
+
+    if let Some(body) = response_body {
+        lines.push(format!("  Response body: {}", body));
+    }
+
+    Some(lines.join("\n"))
+}
+
 fn format_storage_text(data: &serde_json::Value) -> Option<String> {
     if let Some(entries) = data.get("data").and_then(|v| v.as_object()) {
         if entries.is_empty() {
@@ -605,6 +668,12 @@ fn print_primary_response(resp: &Response, action: Option<&str>, opts: &OutputOp
         }
         if action == Some("storage_get") {
             if let Some(output) = format_storage_text(data) {
+                println!("{}", output);
+                return;
+            }
+        }
+        if action == Some("request_detail") {
+            if let Some(output) = format_request_detail_text(data) {
                 println!("{}", output);
                 return;
             }
