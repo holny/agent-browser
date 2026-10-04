@@ -376,10 +376,11 @@ pub async fn take_snapshot(
 
             // Request the full DOM subtree (depth: -1) so we can collect all
             // backendNodeIds that live under the matched element.
+            // pierce: true ensures shadow DOM content is included.
             let describe: Value = client
                 .send_command(
                     "DOM.describeNode",
-                    Some(serde_json::json!({ "objectId": object_id, "depth": -1 })),
+                    Some(serde_json::json!({ "objectId": object_id, "depth": -1, "pierce": true })),
                     Some(session_id),
                 )
                 .await?;
@@ -445,15 +446,28 @@ pub async fn take_snapshot(
             .map(|n| n.backend_node_id.is_some_and(|bid| id_set.contains(&bid)))
             .collect();
 
-        // An AX node is a "top-level" match if it is in the subtree but its
-        // parent (in the AX tree) is not.
+        // An AX node is a "top-level" match if it is in the subtree but no
+        // ancestor (in the AX tree) is in the subtree.  This skips intermediate
+        // nodes that failed the backend_id check — e.g., ignored nodes that
+        // lost their id in build_tree, or shadow DOM nodes that require
+        // pierce:true to be collected.  Without this check, such nodes would
+        // cause their descendants to become spurious extra roots and be printed
+        // twice (once as descendants of the real root, once as standalone roots).
         let mut roots = Vec::new();
         for (idx, node) in tree_nodes.iter().enumerate() {
             if !in_subtree[idx] {
                 continue;
             }
-            let parent_in_subtree = node.parent_idx.is_some_and(|pidx| in_subtree[pidx]);
-            if !parent_in_subtree {
+            let mut has_ancestor_in_subtree = false;
+            let mut ancestor_idx = node.parent_idx;
+            while let Some(pidx) = ancestor_idx {
+                if in_subtree[pidx] {
+                    has_ancestor_in_subtree = true;
+                    break;
+                }
+                ancestor_idx = tree_nodes[pidx].parent_idx;
+            }
+            if !has_ancestor_in_subtree {
                 roots.push(idx);
             }
         }
