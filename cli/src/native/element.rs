@@ -338,6 +338,9 @@ async fn resolve_center_in_same_process_frame(
             if (!doc) return null;
             const el = {find_expr};
             if (!el) return null;
+            const actionability = {ACTIONABILITY_JS};
+            const reason = actionability(el);
+            if (reason) return {{ error: reason }};
             if (el.scrollIntoViewIfNeeded) el.scrollIntoViewIfNeeded(true);
             else el.scrollIntoView({{ block: 'center', inline: 'center' }});
             const rect = el.getBoundingClientRect();
@@ -367,6 +370,9 @@ async fn resolve_center_in_same_process_frame(
         )
         .await?;
     let value = result.get("result").and_then(|r| r.get("value"));
+    if let Some(reason) = value.and_then(|v| v.get("error")).and_then(|v| v.as_str()) {
+        return Err(actionability_error(selector, reason));
+    }
     if let Some(blocker) = value
         .and_then(|v| v.get("blocker"))
         .and_then(|v| v.as_str())
@@ -627,7 +633,11 @@ async fn check_node_interception(
                 topDoc = topDoc.defaultView.frameElement.ownerDocument;
             }}
             const blockerAt = {BLOCKER_AT_JS};
-            return blockerAt(topDoc, this, x, y);
+            const actionability = {ACTIONABILITY_JS};
+            return {{
+                blocker: blockerAt(topDoc, this, x, y),
+                reason: actionability(this),
+            }};
         }}"#,
     );
     let result = client
@@ -643,12 +653,13 @@ async fn check_node_interception(
         )
         .await;
     if let Ok(value) = result {
-        if let Some(blocker) = value
-            .get("result")
-            .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_str())
-        {
-            return Err(intercepted_error(target, blocker));
+        if let Some(payload) = value.get("result").and_then(|r| r.get("value")) {
+            if let Some(reason) = payload.get("reason").and_then(|v| v.as_str()) {
+                return Err(actionability_error(target, reason));
+            }
+            if let Some(blocker) = payload.get("blocker").and_then(|v| v.as_str()) {
+                return Err(intercepted_error(target, blocker));
+            }
         }
     }
     Ok(())
@@ -955,6 +966,40 @@ const BLOCKER_AT_JS: &str = r#"(doc, el, x, y) => {
     return desc;
 }"#;
 
+/// JS that reports why an element cannot receive a pointer event, or null when
+/// it can. `display:none` and the `hidden` attribute leave no layout box,
+/// `visibility:hidden` keeps one but paints nothing, and `:disabled` also
+/// covers controls inside a disabled `<fieldset>`.
+const ACTIONABILITY_JS: &str = r#"(el) => {
+    const rect = el.getBoundingClientRect();
+    const view = el.ownerDocument && el.ownerDocument.defaultView;
+    const style = view ? view.getComputedStyle(el) : null;
+    if (rect.width <= 0 || rect.height <= 0 || (style && style.visibility === 'hidden')) {
+        return 'not visible';
+    }
+    if (el.matches && el.matches(':disabled')) return 'not enabled';
+    return null;
+}"#;
+
+/// Error for an element that cannot receive the interaction at all.
+fn actionability_error(target: &str, reason: &str) -> String {
+    match reason {
+        "not visible" => format!(
+            "Element '{}' is not visible (no layout box, or visibility is hidden), so the click would not reach it",
+            target
+        ),
+        "not enabled" => format!(
+            "Element '{}' is disabled, so the click would not reach it",
+            target
+        ),
+        "outside the viewport" => format!(
+            "Element '{}' is outside the viewport and cannot be scrolled into view, so the click would not reach it",
+            target
+        ),
+        other => format!("Element '{}' cannot be clicked: {}", target, other),
+    }
+}
+
 fn build_selector_js(selector: &str) -> String {
     let find_expr = build_find_element_js(selector);
     // Input events dispatch at viewport coordinates, so an element outside the
@@ -965,6 +1010,9 @@ fn build_selector_js(selector: &str) -> String {
         r#"(() => {{
             const el = {find_expr};
             if (!el) return null;
+            const actionability = {ACTIONABILITY_JS};
+            const reason = actionability(el);
+            if (reason) return {{ error: reason }};
             const inView = (r) => r.width > 0 && r.height > 0 &&
                 r.bottom > 0 && r.right > 0 &&
                 r.top < (window.innerHeight || document.documentElement.clientHeight) &&
@@ -973,6 +1021,7 @@ fn build_selector_js(selector: &str) -> String {
             if (!inView(rect)) {{
                 el.scrollIntoView({{ block: 'center', inline: 'center', behavior: 'instant' }});
                 rect = el.getBoundingClientRect();
+                if (!inView(rect)) return {{ error: 'outside the viewport' }};
             }}
             const x = rect.x + rect.width / 2;
             const y = rect.y + rect.height / 2;
@@ -1002,6 +1051,9 @@ async fn resolve_by_selector(
         .await?;
 
     let val = result.result.value.unwrap_or(Value::Null);
+    if let Some(reason) = val.get("error").and_then(|v| v.as_str()) {
+        return Err(actionability_error(selector, reason));
+    }
     if let Some(blocker) = val.get("blocker").and_then(|v| v.as_str()) {
         return Err(intercepted_error(selector, blocker));
     }
@@ -1172,7 +1224,12 @@ pub async fn is_element_enabled(
         .send_command_typed(
             "Runtime.callFunctionOn",
             &CallFunctionOnParams {
-                function_declaration: "function() { return !this.disabled; }".to_string(),
+                // `:disabled` also reports controls inside a disabled
+                // `<fieldset>` as disabled, which reading only the element's own
+                // `disabled` property misses.
+                function_declaration:
+                    "function() { return !(this.matches && this.matches(':disabled')); }"
+                        .to_string(),
                 object_id: Some(object_id),
                 arguments: None,
                 return_by_value: Some(true),
@@ -1643,6 +1700,34 @@ mod tests {
         // "xpath" without "=" should be treated as CSS selector
         let js = build_selector_js("xpath//div");
         assert!(js.contains("document.querySelector"));
+    }
+
+    #[test]
+    fn test_build_selector_js_carries_actionability_checks() {
+        let js = build_selector_js("#submit-btn");
+        // Visibility: no layout box (display:none, hidden) or visibility:hidden.
+        assert!(js.contains("not visible"));
+        // Enabled: `:disabled` covers controls inside a disabled <fieldset>.
+        assert!(js.contains("':disabled'"));
+        // An element that cannot be scrolled into view is rejected instead of
+        // dispatching at off-viewport coordinates.
+        assert!(js.contains("outside the viewport"));
+    }
+
+    #[test]
+    fn test_actionability_error_messages() {
+        assert_eq!(
+            actionability_error("#gone", "not visible"),
+            "Element '#gone' is not visible (no layout box, or visibility is hidden), so the click would not reach it"
+        );
+        assert_eq!(
+            actionability_error("#save", "not enabled"),
+            "Element '#save' is disabled, so the click would not reach it"
+        );
+        assert_eq!(
+            actionability_error("#far", "outside the viewport"),
+            "Element '#far' is outside the viewport and cannot be scrolled into view, so the click would not reach it"
+        );
     }
 
     #[test]

@@ -5419,6 +5419,179 @@ async fn e2e_click_reports_covering_overlay() {
 }
 
 // ---------------------------------------------------------------------------
+// Click must fail on elements that cannot receive the event (issue #2056)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_rejects_hidden_and_disabled_elements() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"
+        <html>
+        <body>
+            <button id="gone" style="display:none">Gone</button>
+            <button id="hidden-attr" hidden>Hidden</button>
+            <button id="invisible" style="visibility:hidden">Invisible</button>
+            <button id="off-page" style="position:absolute;left:-9999px">Off page</button>
+            <button id="disabled-btn" disabled>Disabled</button>
+            <fieldset disabled><button id="fieldset-disabled">Fieldset disabled</button></fieldset>
+            <button id="ok" onclick="document.getElementById('result').textContent = 'clicked'">Ok</button>
+            <div id="result">idle</div>
+        </body>
+        </html>
+    "#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    for (id, selector, expected) in [
+        ("3", "#gone", "is not visible"),
+        ("4", "#hidden-attr", "is not visible"),
+        ("5", "#invisible", "is not visible"),
+        ("6", "#off-page", "outside the viewport"),
+        ("7", "#disabled-btn", "is disabled"),
+        ("8", "#fieldset-disabled", "is disabled"),
+    ] {
+        let resp = execute_command(
+            &json!({ "id": id, "action": "click", "selector": selector }),
+            &mut state,
+        )
+        .await;
+        assert_eq!(resp["success"], false, "{selector} should fail: {resp}");
+        let error = resp["error"].as_str().unwrap_or_default();
+        assert!(
+            error.contains(expected),
+            "unexpected error for {selector}: {error}"
+        );
+    }
+
+    // Nothing landed on the page: the click target never received the event.
+    let resp = execute_command(
+        &json!({ "id": "9", "action": "gettext", "selector": "#result" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "idle");
+
+    // A visible, enabled button still works.
+    let resp = execute_command(
+        &json!({ "id": "10", "action": "click", "selector": "#ok" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    let resp = execute_command(
+        &json!({ "id": "11", "action": "gettext", "selector": "#result" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["text"], "clicked");
+
+    // `is enabled` reports a control inside a disabled <fieldset> as disabled.
+    let resp = execute_command(
+        &json!({ "id": "12", "action": "isenabled", "selector": "#fieldset-disabled" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["enabled"], false);
+
+    let resp = execute_command(
+        &json!({ "id": "13", "action": "isenabled", "selector": "#ok" }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+    assert_eq!(get_data(&resp)["enabled"], true);
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+#[tokio::test]
+#[ignore]
+async fn e2e_click_by_ref_rejects_disabled_element() {
+    let mut state = DaemonState::new();
+
+    let resp = execute_command(
+        &json!({ "id": "1", "action": "launch", "headless": true }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let html = r#"
+        <html>
+        <body>
+            <button id="disabled-btn" disabled>Disabled</button>
+            <button id="ok" onclick="document.getElementById('result').textContent = 'clicked'">Ok</button>
+            <div id="result">idle</div>
+        </body>
+        </html>
+    "#;
+    let url = format!("data:text/html;base64,{}", STANDARD.encode(html));
+    let resp = execute_command(
+        &json!({ "id": "2", "action": "navigate", "url": url }),
+        &mut state,
+    )
+    .await;
+    assert_success(&resp);
+
+    let resp = execute_command(&json!({ "id": "3", "action": "snapshot" }), &mut state).await;
+    assert_success(&resp);
+    let snapshot = get_data(&resp)["snapshot"].as_str().unwrap();
+    assert!(
+        snapshot.contains("[disabled"),
+        "snapshot should mark the disabled button: {snapshot}"
+    );
+
+    // Find the ref of the disabled button and click it by ref.
+    let mut disabled_ref = String::new();
+    for line in snapshot.lines() {
+        if line.contains("Disabled") {
+            if let Some(start) = line.find("ref=") {
+                disabled_ref = line[start + 4..]
+                    .trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
+                    .to_string();
+            }
+        }
+    }
+    assert!(
+        !disabled_ref.is_empty(),
+        "no ref found for the disabled button: {snapshot}"
+    );
+
+    let resp = execute_command(
+        &json!({ "id": "4", "action": "click", "selector": disabled_ref }),
+        &mut state,
+    )
+    .await;
+    assert_eq!(resp["success"], false, "disabled ref click: {resp}");
+    let error = resp["error"].as_str().unwrap_or_default();
+    assert!(
+        error.contains("is disabled"),
+        "unexpected error for disabled ref: {error}"
+    );
+
+    let resp = execute_command(&json!({ "id": "99", "action": "close" }), &mut state).await;
+    assert_success(&resp);
+}
+
+// ---------------------------------------------------------------------------
 // Profile cookie persistence across restarts
 // ---------------------------------------------------------------------------
 
